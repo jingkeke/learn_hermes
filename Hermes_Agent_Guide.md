@@ -30,6 +30,7 @@ npm install -g hermes-web-ui
 hermes-web-ui start
 ```
 启动后即可在浏览器打开 `http://localhost:8648`。
+- **项目链接**: [EKKOLearnAI/hermes-web-ui](https://github.com/EKKOLearnAI/hermes-web-ui)
 
 ---
 
@@ -58,12 +59,23 @@ Hermes Agent (自 v0.12.0+ 起) 是由 Nous Research 打造的开源自主智能
 
 1. **自主小说与长文创作 (autonovel)**
    - **简介**: 基于 Hermes 构建的自主小说创作管道。设定好大纲后，它能利用智能体循环端到端生成超过 10 万字的长篇内容，极度适合睡前扔给它在后台慢慢跑。
+   - **项目链接**: [NousResearch/autonovel](https://github.com/NousResearch/autonovel)
+   - **配置方法**: 这是一个独立项目，克隆后通过 `uv pip install -e .` 安装，并在其配置文件中指向你本地的 omlx 端点即可运行。
+
 2. **自动化 SRE 运维 (hermes-incident-commander)**
    - **简介**: 运维自愈智能体。通过 Hermes 的 Cron 调度定期检查服务器或服务状态，一旦发现异常会自动诊断并尝试执行修复脚本。
+   - **项目链接**: [Lethe044/hermes-incident-commander](https://github.com/Lethe044/hermes-incident-commander)
+   - **配置方法**: 将仓库中的技能文件夹拷贝至 `~/.hermes/skills/incident-commander/`，并在 `~/.hermes/config.yaml` 中配置你想要监控的服务器 IP 列表。
+
 3. **多模态图表生成 (drawio-skill)**
    - **简介**: 从自然语言生成 draw.io 架构图并导出为 PNG/SVG。它让 Hermes 在解释复杂系统时，能直接吐出一张结构清晰的图表。
+   - **项目链接**: [Agents365-ai/drawio-skill](https://github.com/Agents365-ai/drawio-skill)
+   - **配置方法**: 在终端运行 `python3 tools/install.py install --host hermes`，它会自动将自己注册到 Hermes 的技能库中。
+
 4. **自我提升道场 (hermes-dojo)**
    - **简介**: 一个自动化的自我改进闭环，专门监控 Hermes 的表现，挑出执行效率低下的任务让其自我复盘并优化。
+   - **项目链接**: [Yonkoo11/hermes-dojo](https://github.com/Yonkoo11/hermes-dojo)
+   - **配置方法**: 将 `hermes-dojo` 文件夹放入 `~/.hermes/plugins/`，重启 Hermes Gateway 即可生效。
 
 ---
 
@@ -73,31 +85,51 @@ Hermes Agent (自 v0.12.0+ 起) 是由 Nous Research 打造的开源自主智能
 
 ### 1. 自我进化引擎 (hermes-agent-self-evolution)
 - **作用**: 让 Hermes 自己修改自己的代码、技能和系统提示词。不需要 GPU 训练，完全通过 API 调用闭环完成。它能让你的 Hermes 针对你个人的任务越做越顺手。
-- **如何使用**:
+- **项目链接**: [NousResearch/hermes-agent-self-evolution](https://github.com/NousResearch/hermes-agent-self-evolution)
+- **如何配置与使用**:
   ```bash
-  # 在你的工作区克隆进化引擎
+  # 1. 在你的工作区克隆进化引擎
   git clone https://github.com/NousResearch/hermes-agent-self-evolution.git
   cd hermes-agent-self-evolution
+
+  # 2. 安装依赖
   uv pip install -e ".[dev]"
 
-  # 指定你本地的 hermes 配置目录
+  # 3. 指定你本地的 hermes 配置目录
   export HERMES_AGENT_REPO=~/.hermes/hermes-agent
 
-  # 针对某个不顺手的技能（例如代码审查）启动 10 轮进化迭代
-  python -m evolution.skills.evolve_skill --skill github-code-review --iterations 10
+  # 4. 针对某个不顺手的技能（例如 github-code-review）启动 10 轮进化迭代
+  python -m evolution.skills.evolve_skill --skill github-code-review --iterations 10 --eval-source sessiondb
   ```
 
 ### 2. 终端输出压缩器 (rtk-hermes)
 - **作用**: **(强烈推荐 32G Mac 用户安装！)** 这是一个原生插件。它能拦截 Shell 命令的输出，并压缩 60%-90% 的终端冗余信息，然后再喂给大模型。这不仅省 Context Window，还能大幅减轻本地 35B 模型的阅读负担，间接提升响应速度。
-- **如何使用**: 直接作为 Hermes 插件加载，随网关启动自动生效，零配置。
+- **项目链接**: [ogallotti/rtk-hermes](https://github.com/ogallotti/rtk-hermes)
+- **如何配置与使用**:
+  ```bash
+  # 下载插件并放入 plugins 目录
+  git clone https://github.com/ogallotti/rtk-hermes.git ~/.hermes/plugins/rtk-hermes
+
+  # 重启 Hermes
+  hermes-web-ui restart
+  ```
+  该插件零配置，随网关启动自动生效，拦截所有 `execute_code` 的长输出。
 
 ### 3. YouTube 视频转录技能 (youtube-skills)
 - **作用**: 让 Hermes 能够稳定提取 YouTube 视频内容和字幕。你可以在微信里发个 YouTube 链接给它，让它慢慢看完并总结。
-- **如何使用**: 通过 `hermeshub` 或将技能文件夹拷贝到 `~/.hermes/skills/` 即可。
+- **项目链接**: [ZeroPointRepo/youtube-skills](https://github.com/ZeroPointRepo/youtube-skills)
+- **如何配置与使用**:
+  ```bash
+  git clone https://github.com/ZeroPointRepo/youtube-skills.git
+  cp -r youtube-skills ~/.hermes/skills/
+  ```
+  在对话中直接输入：“帮我总结这个 YouTube 视频的内容：[视频链接]” 即可自动触发。
 
-### 4. 微信/Telegram 桥接模块 (内置于 Web UI)
-- **作用**: 摆脱死板的终端交互，让你随时随地通过手机指使 Hermes。
-- **如何使用**: 在 `hermes-web-ui` 的控制面板中，找到“平台渠道 (Platform Channels)”，直接浏览器扫码绑定微信，或填入 Telegram Bot Token。
+### 4. 天气与环境插件 (hermes-weather-plugin)
+- **作用**: 提供专业级气象数据和雷达图像获取能力。
+- **项目链接**: [FahrenheitResearch/hermes-weather-plugin](https://github.com/FahrenheitResearch/hermes-weather-plugin)
+- **如何配置与使用**:
+  将克隆后的文件夹放入 `~/.hermes/plugins/` 目录，并在 `~/.hermes/config.yaml` 中为该插件配置默认坐标即可。
 
 ---
 
@@ -110,7 +142,7 @@ Hermes Agent (自 v0.12.0+ 起) 是由 Nous Research 打造的开源自主智能
 `http://127.0.0.1:8080/v1`
 
 ### 第二步：修改 Hermes 配置文件
-打开或创建 `~/.hermes/config.yaml`，填入以下配置：
+打开 `~/.hermes/config.yaml`，填入以下配置：
 
 ```yaml
 # ~/.hermes/config.yaml
