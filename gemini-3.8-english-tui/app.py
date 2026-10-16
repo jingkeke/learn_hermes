@@ -1,39 +1,51 @@
 import os
 import asyncio
-from typing import AsyncGenerator
+import pyaudio
 from textual.app import App, ComposeResult
-from textual.widgets import Header, Footer, Input, Log, Static, RichLog
+from textual.widgets import Header, Footer, Input, RichLog, Static
 from textual.containers import Vertical, Horizontal
 from textual import work
 from google import genai
 from google.genai import types
+from textual.binding import Binding
 
-# 读取 API KEY
+# ================= Configuration =================
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
-
-# 设定模型版本 (2026年设定)
-# 注意：为了使代码能在2025年的真实环境中进行演示，这里加了 fallback 机制。
-# 如果想体验纯正的 2026 感受，可以将 fallback 均改成未来模型名
-LIVE_MODEL = "gemini-3.8-live"
-THINKING_MODEL = "gemini-3.8-live-extended-thinking"
-
-# Fallback 对于实际测试非常必要，如果没有设置，将抛出找不到模型的错误
-# 为演示顺畅，我们在本地真实调用时使用现有的先进模型。
-ACTUAL_LIVE_MODEL = os.environ.get("ACTUAL_LIVE_MODEL", "gemini-2.5-flash")
+ACTUAL_LIVE_MODEL = os.environ.get("ACTUAL_LIVE_MODEL", "gemini-2.0-flash-exp")
 ACTUAL_THINKING_MODEL = os.environ.get("ACTUAL_THINKING_MODEL", "gemini-2.0-flash-thinking-exp-01-21")
 
+# pyaudio config (from official demo)
+FORMAT = pyaudio.paInt16
+CHANNELS = 1
+SEND_SAMPLE_RATE = 16000
+RECEIVE_SAMPLE_RATE = 24000
+CHUNK_SIZE = 1024
+
+CONFIG = {
+    "response_modalities": ["AUDIO"],
+    "system_instruction": "You are a helpful native English tutor. Practice English conversation with the user.",
+    "output_audio_transcription": {},
+    "input_audio_transcription": {},
+}
 
 class EnglishTutorApp(App):
-    """一个通过 Gemini 3.8 进行英语实时交流和深度解析的终端应用"""
+    """Gemini 3.8 Speech-to-Speech English Tutor TUI"""
 
     CSS = """
     Screen {
         layout: vertical;
     }
+    #status-bar {
+        height: 3;
+        dock: top;
+        background: #112233;
+        color: white;
+        padding: 1;
+        content-align: center middle;
+    }
     #chat-log {
         height: 1fr;
         border: solid green;
-        padding: 1;
         margin: 1;
     }
     #input-box {
@@ -41,143 +53,226 @@ class EnglishTutorApp(App):
         margin: 1;
         border: solid cyan;
     }
-    .user-msg {
-        color: cyan;
-    }
-    .bot-msg {
-        color: green;
-    }
-    .think-msg {
-        color: yellow;
-        text-style: italic;
-    }
-    .error-msg {
-        color: red;
-    }
+    .status-active { color: #00ff00; text-style: bold; }
+    .status-muted { color: #ff0000; text-style: bold; }
+    .status-thinking { color: #ffff00; text-style: bold; }
     """
 
     BINDINGS = [
-        ("ctrl+q", "quit", "Quit"),
-        ("ctrl+t", "deep_think", "Deep Analyze (Extended Thinking)"),
+        Binding("ctrl+q", "quit", "Quit"),
+        Binding("ctrl+p", "toggle_mic", "Toggle Mic (Mute/Unmute)"),
+        Binding("ctrl+t", "deep_think", "Deep Analyze Last Sentence"),
     ]
 
     def __init__(self):
         super().__init__()
-        self.chat_history = []
-        if GEMINI_API_KEY:
-            self.client = genai.Client(api_key=GEMINI_API_KEY)
-        else:
-            self.client = None
+        self.pya = pyaudio.PyAudio()
+        self.audio_queue_output = asyncio.Queue()
+        self.audio_queue_mic = asyncio.Queue(maxsize=5)
+        self.audio_stream = None
+        self.client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
+
+        # State variables
+        self.is_mic_muted = False
+        self.is_connected = False
+        self.last_user_transcription = ""
+        self.live_session = None
+        self.tasks_group = None
 
     def compose(self) -> ComposeResult:
-        """构建应用界面"""
         yield Header(show_clock=True)
+        self.status_bar = Static(id="status-bar")
+        yield self.status_bar
         self.chat_log = RichLog(id="chat-log", markup=True, wrap=True)
         yield self.chat_log
-        self.input_box = Input(placeholder="Type your English message here... (Press Enter to send, Ctrl+T to Analyze)", id="input-box")
+        self.input_box = Input(placeholder="System instructions / Prompts (Press Enter to send)", id="input-box")
         yield self.input_box
         yield Footer()
 
     def on_mount(self) -> None:
-        """应用启动时的操作"""
-        self.title = "Gemini 3.8 English Tutor"
-        self.sub_title = "Powered by Google Live & Extended Thinking API (macOS 26.6)"
+        self.title = "Gemini 3.8 Live Speech Tutor"
+        self.update_status("Initializing...")
 
         if not self.client:
-            self.chat_log.write("[bold red]Error: GEMINI_API_KEY environment variable not set.[/bold red]")
-            self.chat_log.write("Please set it and restart the application.")
-            self.input_box.disabled = True
+            self.chat_log.write("[bold red]Error: GEMINI_API_KEY not set.[/bold red]")
             return
 
-        self.chat_log.write(f"[bold green]System Info:[/bold green] macOS 26.6 / M-Series Architecture")
-        self.chat_log.write(f"[bold green]Models Loaded:[/bold green] {LIVE_MODEL} (Live), {THINKING_MODEL} (Thinking)")
+        self.chat_log.write(f"[bold green]System Info:[/bold green] macOS 26.6 / Live Audio Mode")
+        self.chat_log.write(f"[bold green]Model:[/bold green] {ACTUAL_LIVE_MODEL}")
         self.chat_log.write("---")
-        self.chat_log.write("[bold magenta]Tutor:[/bold magenta] Hello! I am your English tutor powered by Gemini 3.8. Let's practice some English!")
+        self.chat_log.write("Use your microphone to speak! I will output transcription here.\n")
 
-        # 初始化对话 session
-        self.chat_session = self.client.chats.create(
-            model=ACTUAL_LIVE_MODEL,
-            config=types.GenerateContentConfig(
-                system_instruction="You are an expert English language tutor. Your goal is to engage in a conversation with the user in English. Keep your responses natural, encouraging, and helpful. If the user makes a minor mistake, correct them gently. Reply ONLY in English.",
-            )
+        self.start_live_session()
+
+    def update_status(self, msg: str, css_class: str = "status-active") -> None:
+        mic_state = "[MUTED]" if self.is_mic_muted else "[MIC ACTIVE]"
+        self.status_bar.update(f"[{css_class}]Status: {msg} | Mic: {mic_state}[/{css_class}]")
+
+    @work(exclusive=True, thread=True)
+    def start_live_session(self) -> None:
+        """Runs the main async loop for the Live API in a background thread."""
+        asyncio.run(self._async_live_session_runner())
+
+    async def _async_live_session_runner(self):
+        try:
+            self.app.call_from_thread(self.update_status, "Connecting to Live API...")
+            async with self.client.aio.live.connect(model=ACTUAL_LIVE_MODEL, config=CONFIG) as live_session:
+                self.live_session = live_session
+                self.app.call_from_thread(self.update_status, "Connected! Start speaking.", "status-active")
+                self.app.call_from_thread(self.chat_log.write, "[green]Connection established. Awaiting audio...[/green]")
+
+                async with asyncio.TaskGroup() as tg:
+                    self.tasks_group = tg
+                    tg.create_task(self.listen_audio())
+                    tg.create_task(self.send_realtime(live_session))
+                    tg.create_task(self.receive_audio(live_session))
+                    tg.create_task(self.play_audio())
+        except asyncio.CancelledError:
+            self.app.call_from_thread(self.chat_log.write, "[yellow]Session cancelled.[/yellow]")
+        except Exception as e:
+            self.app.call_from_thread(self.chat_log.write, f"[red]Live API Error: {str(e)}[/red]")
+        finally:
+            self.app.call_from_thread(self.update_status, "Disconnected", "status-muted")
+            if self.audio_stream:
+                self.audio_stream.close()
+
+    async def listen_audio(self):
+        mic_info = self.pya.get_default_input_device_info()
+        self.audio_stream = await asyncio.to_thread(
+            self.pya.open,
+            format=FORMAT,
+            channels=CHANNELS,
+            rate=SEND_SAMPLE_RATE,
+            input=True,
+            input_device_index=mic_info["index"],
+            frames_per_buffer=CHUNK_SIZE,
         )
+        kwargs = {"exception_on_overflow": False}
+        while True:
+            data = await asyncio.to_thread(self.audio_stream.read, CHUNK_SIZE, **kwargs)
+            if not self.is_mic_muted:
+                await self.audio_queue_mic.put({"data": data, "mime_type": "audio/pcm"})
+
+    async def send_realtime(self, session):
+        while True:
+            msg = await self.audio_queue_mic.get()
+            if not self.is_mic_muted:
+                await session.send_realtime_input(audio=msg)
+
+    async def receive_audio(self, session):
+        """Receives responses and manages UI text append correctly without using the unsupported 'end' argument."""
+        last_was_input = False
+        current_input_buffer = ""
+        current_output_buffer = ""
+
+        while True:
+            turn = session.receive()
+            async for response in turn:
+                sc = response.server_content
+                if not sc:
+                    continue
+
+                # Handle Audio Output
+                if sc.model_turn:
+                    for part in sc.model_turn.parts:
+                        if part.inline_data and isinstance(part.inline_data.data, bytes):
+                            self.audio_queue_output.put_nowait(part.inline_data.data)
+
+                # Handle Model Transcription (Output)
+                if sc.output_transcription:
+                    if last_was_input and current_input_buffer:
+                        # Flush input buffer
+                        self.app.call_from_thread(self.chat_log.write, f"[cyan]You:[/cyan] [i]{current_input_buffer}[/i]")
+                        self.last_user_transcription = current_input_buffer
+                        current_input_buffer = ""
+                        last_was_input = False
+
+                    t = sc.output_transcription.text
+                    current_output_buffer += t
+                    if t.rstrip()[-1:] in '.!?':
+                        self.app.call_from_thread(self.chat_log.write, f"[green]Tutor:[/green] {current_output_buffer}")
+                        current_output_buffer = ""
+
+                # Handle User Transcription (Input)
+                if sc.input_transcription:
+                    if not last_was_input and current_output_buffer:
+                        # Flush output buffer
+                        self.app.call_from_thread(self.chat_log.write, f"[green]Tutor:[/green] {current_output_buffer}")
+                        current_output_buffer = ""
+                        last_was_input = True
+
+                    t = sc.input_transcription.text
+                    current_input_buffer += t
+                    if t.rstrip()[-1:] in '.!?':
+                        self.app.call_from_thread(self.chat_log.write, f"[cyan]You:[/cyan] [i]{current_input_buffer}[/i]")
+                        self.last_user_transcription = current_input_buffer
+                        current_input_buffer = ""
+
+            # Empty output queue on interruption
+            while not self.audio_queue_output.empty():
+                self.audio_queue_output.get_nowait()
+
+    async def play_audio(self):
+        stream = await asyncio.to_thread(
+            self.pya.open,
+            format=FORMAT,
+            channels=CHANNELS,
+            rate=RECEIVE_SAMPLE_RATE,
+            output=True,
+        )
+        while True:
+            bytestream = await self.audio_queue_output.get()
+            await asyncio.to_thread(stream.write, bytestream)
+
+    def action_toggle_mic(self) -> None:
+        self.is_mic_muted = not self.is_mic_muted
+        self.update_status("Connected", "status-active")
+
+    def action_deep_think(self) -> None:
+        if not self.last_user_transcription:
+            self.chat_log.write("[yellow]System: No recent speech transcription to analyze.[/yellow]")
+            return
+
+        self.update_status("Extended Thinking...", "status-thinking")
+        self.chat_log.write(f"\n[bold magenta]Deep Analysis (Extended Thinking):[/bold magenta]")
+        self.chat_log.write(f"[italic]Analyzing: '{self.last_user_transcription}'[/italic]")
+
+        self.run_extended_thinking(self.last_user_transcription)
+
+    @work(exclusive=True, thread=True)
+    def run_extended_thinking(self, text_to_analyze: str) -> None:
+        try:
+            prompt = f"As an expert linguistic analyzer, deeply analyze the following sentence from an English learner: '{text_to_analyze}'. Focus on grammar, syntax structure, vocabulary usage, and native-like phrasing. Provide a detailed, step-by-step thinking process on how you analyze it, and then give suggestions for improvement. Use Chinese."
+            response = self.client.models.generate_content(
+                model=ACTUAL_THINKING_MODEL,
+                contents=prompt,
+            )
+            self.app.call_from_thread(self.chat_log.write, f"\n[yellow]Analysis Result:[/yellow]\n{response.text}\n")
+        except Exception as e:
+            self.app.call_from_thread(self.chat_log.write, f"[red]Analysis Error: {str(e)}[/red]")
+        finally:
+             self.app.call_from_thread(self.update_status, "Connected", "status-active")
 
     async def on_input_submitted(self, message: Input.Submitted) -> None:
-        """处理用户按 Enter 发送的消息"""
+        """允许通过输入框发送文本消息或指令，混合文本与语音"""
         if not message.value.strip():
             return
 
         user_text = message.value
         self.input_box.value = ""
+        self.chat_log.write(f"[cyan]You (Text):[/cyan] {user_text}")
 
-        # 显示用户消息
-        self.chat_log.write(f"\n[cyan]You:[/cyan] {user_text}")
-        self.chat_history.append({"role": "user", "text": user_text})
-
-        # 异步调用流式 API
-        self.stream_response(user_text)
-
-    @work(exclusive=True, thread=True)
-    def stream_response(self, user_text: str) -> None:
-        """在后台线程中流式获取正常对话响应"""
-        try:
-            self.app.call_from_thread(self.chat_log.write, "[green]Tutor (Live):[/green] ", end="")
-
-            response_stream = self.chat_session.send_message_stream(user_text)
-            full_response = ""
-            for chunk in response_stream:
-                if chunk.text:
-                    self.app.call_from_thread(self.chat_log.write, chunk.text, end="")
-                    full_response += chunk.text
-
-            self.app.call_from_thread(self.chat_log.write, "\n")
-            self.chat_history.append({"role": "tutor", "text": full_response})
-
-        except Exception as e:
-            self.app.call_from_thread(self.chat_log.write, f"\n[red]API Error: {str(e)}[/red]\n")
-
-    def action_deep_think(self) -> None:
-        """处理按 Ctrl+T 触发的深度分析逻辑"""
-        if not self.chat_history:
-            self.chat_log.write("\n[yellow]System:[/yellow] No recent message to analyze.")
-            return
-
-        # 获取用户最近发的一条消息
-        last_user_msg = None
-        for msg in reversed(self.chat_history):
-            if msg["role"] == "user":
-                last_user_msg = msg["text"]
-                break
-
-        if not last_user_msg:
-             self.chat_log.write("\n[yellow]System:[/yellow] No recent user message to analyze.")
-             return
-
-        self.chat_log.write(f"\n[bold magenta]Deep Analysis ({THINKING_MODEL}):[/bold magenta]")
-        self.chat_log.write(f"[italic]Analyzing your last sentence: '{last_user_msg}'[/italic]")
-
-        self.run_extended_thinking(last_user_msg)
-
-    @work(exclusive=True, thread=True)
-    def run_extended_thinking(self, text_to_analyze: str) -> None:
-        """调用 Extended Thinking 模型对文本进行深度结构分析和语法纠错"""
-        try:
-            prompt = f"As an expert linguistic analyzer, deeply analyze the following sentence from an English learner: '{text_to_analyze}'. Focus on grammar, syntax structure, vocabulary usage, and native-like phrasing. Provide a detailed, step-by-step thinking process on how you analyze it, and then give suggestions for improvement. Use Chinese to explain the analysis and suggestions."
-
-            # 使用 Thinking Model
-            response = self.client.models.generate_content(
-                model=ACTUAL_THINKING_MODEL,
-                contents=prompt,
+        # 我们可以通过 Live Session 原生发送文本
+        if self.live_session:
+            asyncio.run_coroutine_threadsafe(
+                self.live_session.send_realtime_input(text=user_text),
+                self.workers[0].thread.loop # 这是一个稍微 hack 的方式跨线程发送，在更复杂的应用中应该使用专用的队列
             )
 
-            # 由于当前 API 尚未完美暴露出完整的 raw_thinking_process，但模型本身会在文本中包含极长推演
-            # 或者如果有 thinking_mode 参数则启用。在这里我们模拟模型输出了大段内容
-            self.app.call_from_thread(self.chat_log.write, f"\n[yellow]Thinking Process & Results:[/yellow]")
-            self.app.call_from_thread(self.chat_log.write, f"{response.text}\n")
-
-        except Exception as e:
-            self.app.call_from_thread(self.chat_log.write, f"\n[red]Extended Thinking Error: {str(e)}[/red]\n")
-
+    def on_unmount(self) -> None:
+        if self.audio_stream:
+            self.audio_stream.close()
+        self.pya.terminate()
 
 if __name__ == "__main__":
     app = EnglishTutorApp()
